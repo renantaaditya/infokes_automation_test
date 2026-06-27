@@ -7,3 +7,206 @@ Alasan ini saya tempatkan sebagai yang paling dominan karena hampir di setiap pr
 Penyebab kedua adalah penggunaan locator yang tidak stabil, misalnya XPath absolut berdasarkan posisi DOM (/html/body/div[3]/div[2]/span), atau locator berbasis class CSS yang sering berubah karena refactor styling, atau ID yang di-generate dinamis oleh framework frontend (id="ember482", id="react-select-3-input"). Setiap kali ada perubahan kecil di layout atau struktur komponen, locator ini patah tanpa ada perubahan fungsional sama sekali pada aplikasi — sehingga test gagal padahal aplikasi baik-baik saja.
 3. Test environment dan data tidak terisolasi
 Penyebab ketiga adalah dependency terhadap shared environment/state: test data yang dipakai bersama oleh banyak test (sehingga ada race condition saat dijalankan parallel), database state yang berubah dari test run sebelumnya, atau ketergantungan ke service eksternal/third-party yang tidak stabil. Di CI, eksekusi parallel sering memperparah masalah ini karena beberapa test bisa saling “berebut” resource atau data yang sama.
+
+Part B – Design Automation Test
+Saya pilih Opsi 2 – Real Automation Code, flow Submit Form, menggunakan Java + Selenium WebDriver + JUnit 5, dengan pola Page Object Model (POM) agar maintainable.
+
+Struktur Project :
+src/test/java
+ ├── pages/
+ │    └── ContactFormPage.java
+ ├── tests/
+ │    └── SubmitFormTest.java
+ └── utils/
+      └── WaitUtils.java
+
+1. Page Object — ContactFormPage.java
+package pages;
+
+import org.openqa.selenium.By;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.support.ui.ExpectedConditions;
+import org.openqa.selenium.support.ui.WebDriverWait;
+import java.time.Duration;
+
+public class ContactFormPage {
+
+    private final WebDriver driver;
+    private final WebDriverWait wait;
+
+    // Locator strategy: prioritaskan data-testid (stabil terhadap perubahan style/layout)
+    private final By nameInput      = By.cssSelector("[data-testid='input-name']");
+    private final By emailInput     = By.cssSelector("[data-testid='input-email']");
+    private final By messageInput   = By.cssSelector("[data-testid='input-message']");
+    private final By submitButton   = By.cssSelector("[data-testid='btn-submit']");
+    private final By successBanner  = By.cssSelector("[data-testid='success-banner']");
+    private final By errorMessage   = By.cssSelector("[data-testid='error-message']");
+
+    public ContactFormPage(WebDriver driver) {
+        this.driver = driver;
+        this.wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+    }
+
+    public void fillForm(String name, String email, String message) {
+        WebElement name_ = wait.until(ExpectedConditions.visibilityOfElementLocated(nameInput));
+        name_.clear();
+        name_.sendKeys(name);
+
+        WebElement email_ = wait.until(ExpectedConditions.visibilityOfElementLocated(emailInput));
+        email_.clear();
+        email_.sendKeys(email);
+
+        WebElement message_ = wait.until(ExpectedConditions.visibilityOfElementLocated(messageInput));
+        message_.clear();
+        message_.sendKeys(message);
+    }
+
+    public void submit() {
+        // Waiting berbasis kondisi: tombol harus clickable, bukan sekadar "exist"
+        WebElement btn = wait.until(ExpectedConditions.elementToBeClickable(submitButton));
+        btn.click();
+    }
+
+    public boolean isSubmissionSuccessful() {
+        try {
+            return wait.until(ExpectedConditions.visibilityOfElementLocated(successBanner)) != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public String getErrorMessage() {
+        WebElement err = wait.until(ExpectedConditions.visibilityOfElementLocated(errorMessage));
+        return err.getText();
+    }
+}
+
+2. Test Class — SubmitFormTest.java
+javapackage tests;
+
+import org.junit.jupiter.api.*;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.chrome.ChromeDriver;
+import pages.ContactFormPage;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class SubmitFormTest {
+
+    private WebDriver driver;
+    private ContactFormPage formPage;
+
+    @BeforeEach
+    void setUp() {
+        driver = new ChromeDriver();
+        driver.get("https://example.com/contact");
+        formPage = new ContactFormPage(driver);
+    }
+
+    @Test
+    @DisplayName("Submit form dengan data valid harus menampilkan success banner")
+    void shouldShowSuccessMessage_whenFormSubmittedWithValidData() {
+        // Arrange
+        String name = "Budi Santoso";
+        String email = "budi.santoso@example.com";
+        String message = "Pertanyaan terkait layanan produk.";
+
+        // Act
+        formPage.fillForm(name, email, message);
+        formPage.submit();
+
+        // Assert — assertion jelas dan deskriptif
+        assertThat(formPage.isSubmissionSuccessful())
+                .as("Banner sukses seharusnya muncul setelah submit form valid")
+                .isTrue();
+    }
+
+    @Test
+    @DisplayName("Submit form dengan email tidak valid harus menampilkan error")
+    void shouldShowError_whenEmailInvalid() {
+        formPage.fillForm("Budi Santoso", "invalid-email", "Test message");
+        formPage.submit();
+
+        assertThat(formPage.getErrorMessage())
+                .as("Pesan error format email seharusnya muncul")
+                .contains("format email tidak valid");
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (driver != null) driver.quit();
+    }
+}
+
+Tampilan Hasil Test (contoh output)
+Console / JUnit run:
+
+SubmitFormTest
+✔ Submit form dengan data valid harus menampilkan success banner   [PASSED] (2.41s)
+✘ Submit form dengan email tidak valid harus menampilkan error     [FAILED] (1.87s)
+
+  AssertionError: Pesan error format email seharusnya muncul
+  Expecting actual:
+    "Email wajib diisi"
+  to contain:
+    "format email tidak valid"
+
+Tests run: 2, Failures: 1, Errors: 0, Skipped: 0
+
+Contoh ringkasan Allure Report (jika digunakan):
+
+Test Suite: SubmitFormTest
+─────────────────────────────────────────
+Total: 2   Passed: 1   Failed: 1   Flaky: 0
+Duration: 4.3s
+
+✔ shouldShowSuccessMessage_whenFormSubmittedWithValidData     PASSED
+✘ shouldShowError_whenEmailInvalid                            FAILED
+    Step: submit()
+    Screenshot attached: error_state.png
+
+Poin maintainability yang ditunjukkan:
+
+1. Waiting berbasis kondisi (ExpectedConditions.visibilityOfElementLocated, elementToBeClickable) — tidak ada Thread.sleep().
+2. Locator menggunakan data-testid, lapisan paling stabil terhadap refactor CSS/struktur DOM.
+3. Assertion menggunakan AssertJ dengan pesan deskriptif (.as(...)), bukan assert generik tanpa konteks.
+4. Page Object Model memisahkan logic interaksi UI dari logic test, sehingga locator hanya perlu diubah di satu tempat.
+
+Part C – Failure Investigation (Gagal di CI, Lulus di Local)
+Langkah investigasi berurutan:
+1. Reproduksi kondisi CI di local. Jalankan test secara headless (bukan headed), dengan resolusi viewport, browser version, dan locale yang identik dengan environment CI. Banyak kasus "gagal di CI, lulus di local" sebenarnya disebabkan perbedaan mode headless vs headed atau resource yang lebih terbatas di container CI.
+
+2. Kumpulkan artefak kegagalan dari run CI, minimal:
+• Screenshot pada saat failure
+• Video recording (jika tersedia) dari eksekusi test
+• Log konsol browser dan network (HAR file)
+• Stack trace lengkap + step yang gagal
+• Spesifikasi environment CI: versi browser/driver, OS, alokasi CPU/RAM, apakah test dijalankan parallel
+• Timestamp kegagalan, dikorelasikan dengan log infrastruktur (apakah ada deploy, restart service, atau lonjakan load saat itu)
+
+3. Bandingkan konfigurasi CI vs local — cek apakah ada perbedaan environment variable, feature flag, seed data, urutan eksekusi test (apakah CI menjalankan test secara parallel sementara local sequential), atau dependency service (database/test environment) yang berbeda antara CI dan local.
+
+4. Cek pola kegagalan — apakah gagal di step yang sama setiap kali, atau acak di step berbeda? Apakah gagal di waktu-waktu tertentu (misalnya saat CI load tinggi)? Ini membantu membedakan apakah penyebabnya timing, race condition, atau data contention.
+
+5.Komunikasi dengan developer, dilakukan paralel dengan investigasi:
+• Share screenshot/log/HAR ke developer untuk konfirmasi apakah ada perubahan UI/API terbaru yang relevan dengan area yang gagal.
+• Tanyakan apakah ada deploy/feature flag yang aktif di environment CI tapi belum di local.
+• Diskusikan apakah elemen yang gagal di-locate memang punya data-testid yang stabil, atau perlu ditambahkan.
+• Jika gagal berkaitan dengan API response time, tanyakan ke backend apakah ada known latency issue di environment staging/CI.
+
+Kriteria keputusan — Fix vs Disable vs Delete:
+
+Kriteria :
+• Root cause sudah jelas (timing, locator, data isolation) dan bisa diperbaiki dengan effort wajar
+• Root cause belum ditemukan, tapi test mengcover flow kritikal (misal: login, checkout)
+• Test mengcover flow yang sudah deprecated, duplikat dengan test lain, atau nilai bisnisnya rendah dibanding cost maintenance-nya
+• Kegagalan disebabkan infrastruktur/third-party di luar kendali tim dan tidak ada workaround yang reasonable
+
+Keputusan :
+• Fix — perbaiki waiting strategy/locator/data setup
+• Disable sementara (quarantine) dengan tiket investigasi dan deadline, agar tidak memblokir CI tapi tidak hilang dari radar
+• Delete 
+• Delete atau pindahkan ke level monitoring lain (misal: synthetic monitoring di luar CI test suite)
+
+Prinsip umum: test yang di-disable tanpa rencana investigasi lanjutan biasanya berakhir dihapus secara default (forgotten), jadi setiap keputusan disable harus disertai owner dan timeline, bukan dibiarkan tanpa batas waktu.
